@@ -135,12 +135,26 @@ app.get('/api/verify-session', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // Navigation-based flow (no fetch() anywhere on the client). The Gathurr app
-// submits a real <form> here instead of calling this over fetch(), because
-// the Claude artifact sandbox's CSP blocks background fetch()/XHR calls to
-// external domains but does NOT block full-page navigations like a form
-// submit or a server-issued redirect.
+// navigates the browser straight here instead of calling this over fetch(),
+// because the Claude artifact sandbox's CSP blocks background fetch()/XHR
+// calls to external domains but does NOT block full-page navigations like a
+// form submit, an <a>/window.open() to a real URL, or a server-issued
+// redirect.
 //
-//   1. Browser form-POSTs here with the payment details.
+// Registered for BOTH GET and POST:
+//   - GET  (?amount=...&fromName=...&toName=...&tripName=...&returnUrl=...)
+//     is what the client actually uses now: it hands window.open() a
+//     complete, real https:// URL up front. (An earlier attempt opened a
+//     blank popup with window.open('', name) and form-POSTed into it, but
+//     Claude's artifact host wraps window.open() and rejects a call that
+//     isn't given a real, fetchable URL immediately — "Invalid request url:
+//     about:blank" — so the destination URL has to be fully formed before
+//     window.open() is ever called.)
+//   - POST is kept for any client still doing a real <form method="POST">
+//     submit; same handler, just reads req.body instead of req.query.
+//
+//   1. Browser navigates here (GET query string or POST form) with the
+//      payment details.
 //   2. We create the Stripe Checkout Session server-side and 303-redirect
 //      the whole page straight to Stripe's hosted checkout — no JSON, no
 //      fetch, just an HTTP redirect.
@@ -151,9 +165,10 @@ app.get('/api/verify-session', async (req, res) => {
 //      those off window.location — again, no fetch involved.
 // ---------------------------------------------------------------------------
 
-app.post('/checkout', async (req, res) => {
+async function handleCheckout(req, res) {
   try {
-    const { amount, fromName, toName, tripName, returnUrl } = req.body;
+    const source = req.method === 'GET' ? req.query : req.body;
+    const { amount, fromName, toName, tripName, returnUrl } = source;
 
     if (!amount || Number(amount) <= 0) return res.status(400).send('amount must be a positive number');
     if (!fromName || !toName) return res.status(400).send('fromName and toName are required');
@@ -188,7 +203,9 @@ app.post('/checkout', async (req, res) => {
     console.error('checkout error:', err);
     res.status(500).send(`Could not start Stripe checkout: ${err.message}`);
   }
-});
+}
+app.get('/checkout', handleCheckout);
+app.post('/checkout', handleCheckout);
 
 app.get('/return', async (req, res) => {
   const { session_id, returnUrl } = req.query;
