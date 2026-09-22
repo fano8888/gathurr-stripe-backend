@@ -57,6 +57,7 @@ app.post('/api/webhook', express.raw({ type: 'application/json' }), (req, res) =
 });
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // for the real <form> POST from Gathurr
 
 // CORS: the Gathurr artifact is served from claude.ai / claude.site, so allow
 // requests from there. Loosen or tighten this allowlist to match your setup.
@@ -129,6 +130,80 @@ app.get('/api/verify-session', async (req, res) => {
   } catch (err) {
     console.error('verify-session error:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Navigation-based flow (no fetch() anywhere on the client). The Gathurr app
+// submits a real <form> here instead of calling this over fetch(), because
+// the Claude artifact sandbox's CSP blocks background fetch()/XHR calls to
+// external domains but does NOT block full-page navigations like a form
+// submit or a server-issued redirect.
+//
+//   1. Browser form-POSTs here with the payment details.
+//   2. We create the Stripe Checkout Session server-side and 303-redirect
+//      the whole page straight to Stripe's hosted checkout — no JSON, no
+//      fetch, just an HTTP redirect.
+//   3. Stripe redirects back to OUR /return route (not straight back to the
+//      app), so we can verify the session server-side.
+//   4. We redirect the browser on to the app's own URL, with the verified
+//      result (paid: yes/no) attached as plain query params. The app reads
+//      those off window.location — again, no fetch involved.
+// ---------------------------------------------------------------------------
+
+app.post('/checkout', async (req, res) => {
+  try {
+    const { amount, fromName, toName, tripName, returnUrl } = req.body;
+
+    if (!amount || Number(amount) <= 0) return res.status(400).send('amount must be a positive number');
+    if (!fromName || !toName) return res.status(400).send('fromName and toName are required');
+    if (!returnUrl) return res.status(400).send('returnUrl is required');
+
+    const amountInCents = Math.round(Number(amount) * 100);
+    const backendOrigin = `${req.protocol}://${req.get('host')}`;
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `${tripName || 'Trip'}: ${fromName} → ${toName}`,
+          },
+          unit_amount: amountInCents,
+        },
+        quantity: 1,
+      }],
+      metadata: { fromName, toName, tripName: tripName || '' },
+      // Success sends Stripe's browser back through OUR /return route first
+      // (with the returnUrl carried along), so we can verify server-side
+      // before the browser ever lands back on the app.
+      success_url: `${backendOrigin}/return?session_id={CHECKOUT_SESSION_ID}&returnUrl=${encodeURIComponent(returnUrl)}`,
+      cancel_url: `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}stripe_cancelled=1`,
+    });
+
+    res.redirect(303, session.url); // full-page redirect straight to Stripe, no JSON
+  } catch (err) {
+    console.error('checkout error:', err);
+    res.status(500).send(`Could not start Stripe checkout: ${err.message}`);
+  }
+});
+
+app.get('/return', async (req, res) => {
+  const { session_id, returnUrl } = req.query;
+  if (!returnUrl) return res.status(400).send('Missing returnUrl');
+  if (!session_id) return res.redirect(302, `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}stripe_cancelled=1`);
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+    const paid = session.payment_status === 'paid' ? '1' : '0';
+    const sep = returnUrl.includes('?') ? '&' : '?';
+    res.redirect(302, `${returnUrl}${sep}stripe_session=${encodeURIComponent(session_id)}&stripe_paid=${paid}`);
+  } catch (err) {
+    console.error('return/verify error:', err);
+    const sep = returnUrl.includes('?') ? '&' : '?';
+    res.redirect(302, `${returnUrl}${sep}stripe_session=${encodeURIComponent(session_id)}&stripe_paid=0`);
   }
 });
 
