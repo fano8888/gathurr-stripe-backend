@@ -1,0 +1,15 @@
+{
+  "name": "gathurr-stripe-backend",
+  "version": "1.0.0",
+  "description": "Minimal real Stripe backend for Gathurr's Settle Up screen.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "stripe": "^16.2.0"
+  }
+}
